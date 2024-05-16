@@ -7,50 +7,54 @@ Content-Type: text/x-shellscript; charset="us-ascii"
 #!/bin/bash
 set -e
 
-# Run Order: 1
-# Run Frequency: only once, on first boot
+# Debugging: Log output to a file
+exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
 
-# Install dependencies
-yum update -y
-yum install -y amazon-linux-extras
-amazon-linux-extras install epel -y
-yum install -y awscli jq unzip yum-utils
+# Verify network connectivity
+echo "Checking internet connectivity..."
+ping -c 4 google.com || { echo "Internet connectivity check failed"; exit 1; }
+
+# Update system and install dependencies
+yum update -y || { echo "yum update failed"; exit 1; }
+yum install -y amazon-linux-extras || { echo "yum install amazon-linux-extras failed"; exit 1; }
+amazon-linux-extras install epel -y || { echo "amazon-linux-extras install epel failed"; exit 1; }
+yum install -y awscli jq unzip yum-utils || { echo "yum install dependencies failed"; exit 1; }
 
 # Add HashiCorp repository for Amazon Linux 2
-yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo || { echo "Adding HashiCorp repo failed"; exit 1; }
 
 # Install Vault
 VAULT_VERSION="${vault_version}"  # Make sure to set this variable correctly in your environment
-yum install -y vault-${VAULT_VERSION}*
+yum install -y vault-${VAULT_VERSION}* || { echo "yum install vault failed"; exit 1; }
 
 # Configure system time
 echo "Configuring system time"
-timedatectl set-timezone UTC
+timedatectl set-timezone UTC || { echo "Setting timezone failed"; exit 1; }
 
 # Make the vault user
-useradd --system --shell /sbin/nologin vault
+useradd --system --shell /sbin/nologin vault || { echo "Creating vault user failed"; exit 1; }
 
 # Make the directories
-mkdir -p /opt/vault
-mkdir -p /opt/vault/bin
-mkdir -p /opt/vault/config
-mkdir -p /opt/vault/tls
+mkdir -p /opt/vault || { echo "Creating /opt/vault failed"; exit 1; }
+mkdir -p /opt/vault/bin || { echo "Creating /opt/vault/bin failed"; exit 1; }
+mkdir -p /opt/vault/config || { echo "Creating /opt/vault/config failed"; exit 1; }
+mkdir -p /opt/vault/tls || { echo "Creating /opt/vault/tls failed"; exit 1; }
 
 # Set permissions and ownership
-chmod 755 /opt/vault
-chmod 755 /opt/vault/bin
-chown -R vault:vault /opt/vault
+chmod 755 /opt/vault || { echo "chmod /opt/vault failed"; exit 1; }
+chmod 755 /opt/vault/bin || { echo "chmod /opt/vault/bin failed"; exit 1; }
+chown -R vault:vault /opt/vault || { echo "chown /opt/vault failed"; exit 1; }
 
 # Removing any default installation files from /opt/vault/tls/
-rm -rf /opt/vault/tls/*
+rm -rf /opt/vault/tls/* || { echo "rm -rf /opt/vault/tls/* failed"; exit 1; }
 
 # /opt/vault/tls should be readable by all users of the system
-chmod 0755 /opt/vault/tls
+chmod 0755 /opt/vault/tls || { echo "chmod /opt/vault/tls failed"; exit 1; }
 
 # vault-key.pem should be readable by the vault group only
-touch /opt/vault/tls/vault-key.pem
-chown root:vault /opt/vault/tls/vault-key.pem
-chmod 0640 /opt/vault/tls/vault-key.pem
+touch /opt/vault/tls/vault-key.pem || { echo "touch /opt/vault/tls/vault-key.pem failed"; exit 1; }
+chown root:vault /opt/vault/tls/vault-key.pem || { echo "chown /opt/vault/tls/vault-key.pem failed"; exit 1; }
+chmod 0640 /opt/vault/tls/vault-key.pem || { echo "chmod /opt/vault/tls/vault-key.pem failed"; exit 1; }
 
 --==BOUNDARY==
 Content-Type: text/x-shellscript; charset="us-ascii"
@@ -58,13 +62,10 @@ Content-Type: text/x-shellscript; charset="us-ascii"
 #!/bin/bash
 set -e
 
-# Run Order: 2
-# Run Frequency: only once, on first boot
-
 # Fetch needed data and create self-signed certificate and key
 
-INSTANCE_IP_ADDR=$(curl http://169.254.169.254/latest/meta-data/local-ipv4)
-INSTANCE_DNS_NAME=$(curl http://169.254.169.254/latest/meta-data/local-hostname)
+INSTANCE_IP_ADDR=$(curl http://169.254.169.254/latest/meta-data/local-ipv4) || { echo "Fetching instance IP failed"; exit 1; }
+INSTANCE_DNS_NAME=$(curl http://169.254.169.254/latest/meta-data/local-hostname) || { echo "Fetching instance DNS name failed"; exit 1; }
 
 # Create self-signed certificate for Vault
 openssl req -x509 -sha256 -nodes \
@@ -72,24 +73,21 @@ openssl req -x509 -sha256 -nodes \
   -keyout /opt/vault/tls/vault.key -out /opt/vault/tls/vault.crt \
   -subj "/CN=$INSTANCE_DNS_NAME" \
   -extensions san \
-  -config <(cat /etc/pki/tls/openssl.cnf <(echo -e "\n[san]\nsubjectAltName=DNS:$INSTANCE_DNS_NAME,IP:$INSTANCE_IP_ADDR"))
+  -config <(cat /etc/pki/tls/openssl.cnf <(echo -e "\n[san]\nsubjectAltName=DNS:$INSTANCE_DNS_NAME,IP:$INSTANCE_IP_ADDR")) || { echo "Creating self-signed certificate failed"; exit 1; }
 
 # Set ownership and permissions
-chown vault:vault /opt/vault/tls/vault.key /opt/vault/tls/vault.crt
-chmod 640 /opt/vault/tls/vault.key
-chmod 644 /opt/vault/tls/vault.crt
+chown vault:vault /opt/vault/tls/vault.key /opt/vault/tls/vault.crt || { echo "chown certificates failed"; exit 1; }
+chmod 640 /opt/vault/tls/vault.key || { echo "chmod /opt/vault/tls/vault.key failed"; exit 1; }
+chmod 644 /opt/vault/tls/vault.crt || { echo "chmod /opt/vault/tls/vault.crt failed"; exit 1; }
 
 # Trust the certificate
-cp /opt/vault/tls/vault.crt /etc/pki/tls/certs/vault.crt
+cp /opt/vault/tls/vault.crt /etc/pki/tls/certs/vault.crt || { echo "cp /opt/vault/tls/vault.crt failed"; exit 1; }
 
 --==BOUNDARY==
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/bash
 set -e
-
-# Run Order: 3
-# Run Frequency: only once, on first boot
 
 # Create the Vault configuration file and systemd service file
 
@@ -134,7 +132,7 @@ storage "dynamodb" {
 }
 EOF
 
-chown vault:vault /opt/vault/config/server.hcl
+chown vault:vault /opt/vault/config/server.hcl || { echo "chown /opt/vault/config/server.hcl failed"; exit 1; }
 
 # Create systemd service file for Vault
 cat > /etc/systemd/system/vault.service <<- EOF
@@ -176,27 +174,21 @@ Content-Type: text/x-shellscript; charset="us-ascii"
 #!/bin/bash
 set -e
 
-# Run Order: 4
-# Run Frequency: only once, on first boot
-
 # Replace values in configuration files with instance metadata and start Vault
 
-INSTANCE_IP_ADDR=$(curl http://169.254.169.254/latest/meta-data/local-ipv4)
-sed -i -e "s/INSTANCE_IP_ADDR/$INSTANCE_IP_ADDR/g" /opt/vault/config/server.hcl
+INSTANCE_IP_ADDR=$(curl http://169.254.169.254/latest/meta-data/local-ipv4) || { echo "Fetching instance IP failed"; exit 1; }
+sed -i -e "s/INSTANCE_IP_ADDR/$INSTANCE_IP_ADDR/g" /opt/vault/config/server.hcl || { echo "sed instance IP failed"; exit 1; }
 
 # Enable and start the Vault service
-systemctl daemon-reload
-systemctl enable vault
-systemctl restart vault
+systemctl daemon-reload || { echo "systemctl daemon-reload failed"; exit 1; }
+systemctl enable vault || { echo "systemctl enable vault failed"; exit 1; }
+systemctl restart vault || { echo "systemctl restart vault failed"; exit 1; }
 
 --==BOUNDARY==
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/bash
 set -e
-
-# Run Order: 5
-# Run Frequency: only once, on first boot
 
 # Initialize Vault, create credentials file, encrypt it, upload to S3, and clean up
 
@@ -237,14 +229,11 @@ Content-Type: text/x-shellscript; charset="us-ascii"
 #!/bin/bash
 set -e
 
-# Run Order: 6
-# Run Frequency: only once, on first boot
-
 # Fetch secrets from AWS Secrets Manager and decode them
-secret_result=$(aws secretsmanager get-secret-value --secret-id ${secrets_manager_arn} --region ${region} --output text --query SecretString)
+secret_result=$(aws secretsmanager get-secret-value --secret-id ${secrets_manager_arn} --region ${region} --output text --query SecretString) || { echo "Fetching secrets from Secrets Manager failed"; exit 1; }
 
-jq -r .vault_cert <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-cert.pem
-jq -r .vault_ca <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-ca.pem
-jq -r .vault_pk <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-key.pem
+jq -r .vault_cert <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-cert.pem || { echo "Decoding vault_cert failed"; exit 1; }
+jq -r .vault_ca <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-ca.pem || { echo "Decoding vault_ca failed"; exit 1; }
+jq -r .vault_pk <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-key.pem || { echo "Decoding vault_pk failed"; exit 1; }
 
 --==BOUNDARY==--
