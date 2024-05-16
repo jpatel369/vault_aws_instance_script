@@ -12,12 +12,25 @@ set -e
 
 # Install dependencies
 yum update -y
-yum install -y jq unzip
+yum install -y amazon-linux-extras
+amazon-linux-extras install epel -y
+yum install -y awscli jq unzip yum-utils
 
-# Create the vault user
+# Add HashiCorp repository for Amazon Linux 2
+yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+
+# Install Vault
+VAULT_VERSION="${vault_version}"  # Make sure to set this variable correctly in your environment
+yum install -y vault-${VAULT_VERSION}*
+
+# Configure system time
+echo "Configuring system time"
+timedatectl set-timezone UTC
+
+# Make the vault user
 useradd --system --shell /sbin/nologin vault
 
-# Create directories
+# Make the directories
 mkdir -p /opt/vault
 mkdir -p /opt/vault/bin
 mkdir -p /opt/vault/config
@@ -28,36 +41,16 @@ chmod 755 /opt/vault
 chmod 755 /opt/vault/bin
 chown -R vault:vault /opt/vault
 
-# Get the HashiCorp PGP key
-curl https://keybase.io/hashicorp/pgp_keys.asc | gpg --import
+# Removing any default installation files from /opt/vault/tls/
+rm -rf /opt/vault/tls/*
 
-# Download Vault and signatures
-VAULT_VERSION="1.8.4" # Ensure this variable is set correctly
-curl -Os https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip
-curl -Os https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_SHA256SUMS
-curl -Os https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_SHA256SUMS.sig
+# /opt/vault/tls should be readable by all users of the system
+chmod 0755 /opt/vault/tls
 
-# Verify signatures
-gpg --verify vault_${VAULT_VERSION}_SHA256SUMS.sig vault_${VAULT_VERSION}_SHA256SUMS
-cat vault_${VAULT_VERSION}_SHA256SUMS | grep vault_${VAULT_VERSION}_linux_amd64.zip | sha256sum -c
-
-# Unzip and move to /opt/vault/bin
-unzip vault_${VAULT_VERSION}_linux_amd64.zip
-mv vault /opt/vault/bin/vault
-
-# Give ownership to the vault user
-chown vault:vault /opt/vault/bin/vault
-
-# Create a symlink
-ln -s /opt/vault/bin/vault /usr/local/bin/vault
-
-# Allow vault permissions to use mlock and prevent memory from swapping to disk
-setcap cap_ipc_lock=+ep /opt/vault/bin/vault
-
-# Cleanup files
-rm vault_${VAULT_VERSION}_linux_amd64.zip
-rm vault_${VAULT_VERSION}_SHA256SUMS
-rm vault_${VAULT_VERSION}_SHA256SUMS.sig
+# vault-key.pem should be readable by the vault group only
+touch /opt/vault/tls/vault-key.pem
+chown root:vault /opt/vault/tls/vault-key.pem
+chmod 0640 /opt/vault/tls/vault-key.pem
 
 --==BOUNDARY==
 Content-Type: text/x-shellscript; charset="us-ascii"
@@ -141,10 +134,6 @@ storage "dynamodb" {
 }
 EOF
 
-# Replace placeholder with actual instance IP
-sed -i -e "s/INSTANCE_IP_ADDR/$INSTANCE_IP_ADDR/g" /opt/vault/config/server.hcl
-
-# Set ownership
 chown vault:vault /opt/vault/config/server.hcl
 
 # Create systemd service file for Vault
@@ -195,7 +184,7 @@ set -e
 INSTANCE_IP_ADDR=$(curl http://169.254.169.254/latest/meta-data/local-ipv4)
 sed -i -e "s/INSTANCE_IP_ADDR/$INSTANCE_IP_ADDR/g" /opt/vault/config/server.hcl
 
-# Reload systemd and start Vault
+# Enable and start the Vault service
 systemctl daemon-reload
 systemctl enable vault
 systemctl restart vault
@@ -218,7 +207,7 @@ export VAULT_ADDR="http://127.0.0.1:8199"
 export AWS_DEFAULT_REGION="${VAULT_CLUSTER_REGION}"
 export VAULT_INITIALIZED=$(vault operator init -status) # avoid non-zero exit status
 
-initialize_vault() {
+function initialize_vault {
   # Initialize Vault and save credentials to a file
   vault operator init > vault_credentials.txt
 
@@ -241,5 +230,21 @@ else
   echo "Initializing vault..."
   initialize_vault
 fi
+
+--==BOUNDARY==
+Content-Type: text/x-shellscript; charset="us-ascii"
+
+#!/bin/bash
+set -e
+
+# Run Order: 6
+# Run Frequency: only once, on first boot
+
+# Fetch secrets from AWS Secrets Manager and decode them
+secret_result=$(aws secretsmanager get-secret-value --secret-id ${secrets_manager_arn} --region ${region} --output text --query SecretString)
+
+jq -r .vault_cert <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-cert.pem
+jq -r .vault_ca <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-ca.pem
+jq -r .vault_pk <<< "$secret_result" | base64 -d > /opt/vault/tls/vault-key.pem
 
 --==BOUNDARY==--
